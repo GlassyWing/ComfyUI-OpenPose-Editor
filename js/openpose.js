@@ -1,44 +1,44 @@
-import { app } from "/scripts/app.js";
-import { ComfyWidgets } from "/scripts/widgets.js";
+import {app} from "/scripts/app.js";
+import {ComfyWidgets} from "/scripts/widgets.js";
 import "./fabric.min.js";
 
 const connect_keypoints = [
-	[0, 1],   [1, 2],  [2, 3],   [3, 4],
-	[1, 5],   [5, 6],  [6, 7],   [1, 8],
-	[8, 9],   [9, 10], [1, 11],  [11, 12],
-	[12, 13], [14, 0], [14, 16], [15, 0],
-	[15, 17]
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    [1, 5], [5, 6], [6, 7], [1, 8],
+    [8, 9], [9, 10], [1, 11], [11, 12],
+    [12, 13], [14, 0], [14, 16], [15, 0],
+    [15, 17]
 ]
 
 const connect_color = [
-	[  0,   0, 255],
-	[255,   0,   0],
-	[255, 170,   0],
-	[255, 255,   0],
-	[255,  85,   0],
-	[170, 255,   0],
-	[ 85, 255,   0],
-	[  0, 255,   0],
+    [0, 0, 255],
+    [255, 0, 0],
+    [255, 170, 0],
+    [255, 255, 0],
+    [255, 85, 0],
+    [170, 255, 0],
+    [85, 255, 0],
+    [0, 255, 0],
 
-	[  0, 255,  85],
-	[  0, 255, 170],
-	[  0, 255, 255],
-	[  0, 170, 255],
-	[  0,  85, 255],
-	[ 85,   0, 255],
+    [0, 255, 85],
+    [0, 255, 170],
+    [0, 255, 255],
+    [0, 170, 255],
+    [0, 85, 255],
+    [85, 0, 255],
 
-	[170,   0, 255],
-	[255,   0, 255],
-	[255,   0, 170],
-	[255,   0,  85]
+    [170, 0, 255],
+    [255, 0, 255],
+    [255, 0, 170],
+    [255, 0, 85]
 ]
 
 const DEFAULT_KEYPOINTS = [
-  [241,  77], [241, 120], [191, 118], [177, 183],
-  [163, 252], [298, 118], [317, 182], [332, 245],
-  [225, 241], [213, 359], [215, 454], [270, 240],
-  [282, 360], [286, 456], [232,  59], [253,  60],
-  [225,  70], [260,  72]
+    [241, 77], [241, 120], [191, 118], [177, 183],
+    [163, 252], [298, 118], [317, 182], [332, 245],
+    [225, 241], [213, 359], [215, 454], [270, 240],
+    [282, 360], [286, 456], [232, 59], [253, 60],
+    [225, 70], [260, 72]
 ]
 
 async function readFileToText(file) {
@@ -58,242 +58,334 @@ async function loadImageAsync(imageURL) {
     return new Promise((resolve) => {
         const e = new Image();
         e.setAttribute('crossorigin', 'anonymous');
-        e.addEventListener("load", () => { resolve(e); });
+        e.addEventListener("load", () => {
+            resolve(e);
+        });
         e.src = imageURL;
         return e;
     });
 }
 
 async function canvasToBlob(canvas) {
-    return new Promise(function(resolve) {
+    return new Promise(function (resolve) {
         canvas.toBlob(resolve);
     });
 }
 
+function getPosesFromAux() {
+    let result = {}
+    result["width"] = 512
+    result["height"] = 512
+    result["poses"] = []
+    result["image"] = undefined
+    const poseNodes = app.graph._nodes.filter(node => ["OpenposePreprocessor", "DWPreprocessor"].includes(node.type))
+    for (const poseNode of poseNodes) {
+
+        if (!(poseNode.id in app.nodeOutputs) || !("openpose_json" in app.nodeOutputs[poseNode.id])) {
+            continue
+        }
+
+        const openpose = JSON.parse(app.nodeOutputs[poseNode.id].openpose_json[0])
+        const canvas_width = openpose["canvas_width"]
+        const canvas_height = openpose["canvas_height"]
+        result["width"] = canvas_width
+        result["height"] = canvas_height
+
+        if (!("origin_id" in app.graph.links[poseNode.inputs[0].link])) {
+            continue
+        }
+
+        // get input image
+        let image_node_id = app.graph.links[poseNode.inputs[0].link]["origin_id"]
+        // console.log(app.graph._nodes[poseNode.outputs[0].links[0]])
+        let img = app.graph._nodes_by_id[image_node_id].imgs[0]
+        result["image"] = img
+
+        let last_x = 0
+        let last_y = 0
+        let peoples = openpose["people"]
+
+        for (const people of peoples) {
+            let kp = people["pose_keypoints_2d"]
+            for (let id = 0; id < kp.length; id += 3) {
+                let x = kp[id] <= 1 ? kp[id] * canvas_width : kp[id]
+                let y = kp[id + 1] <= 1 ? kp[id + 1] * canvas_height : kp[id + 1]
+                let f = kp[id + 2]
+                if (f === 1) {
+                    last_x = x
+                    last_y = y
+                } else {
+                    x = last_x + 1
+                    y = last_y + 1
+                }
+                result["poses"].push([x, y])
+            }
+        }
+    }
+    return result
+}
+
 class OpenPosePanel {
     node = null;
-	canvas = null;
-	canvasElem = null
-	panel = null
+    canvas = null;
+    canvasElem = null
+    panel = null
 
-	undo_history = []
-	redo_history = []
+    undo_history = []
+    redo_history = []
 
-	visibleEyes = true;
-	flipped = false;
-	lockMode = false;
+    visibleEyes = true;
+    flipped = false;
+    lockMode = false;
 
-	constructor(panel, node) {
-		this.panel = panel;
+    constructor(panel, node) {
+        this.panel = panel;
         this.node = node;
+        this.last_aux_poses = this.node.properties.savedLastPoses
+        this.last_img_src = this.node.properties.savedLastImgSrc
 
-        const width = 900;
-        const height = 1000;
+        const width = 640;
+        const height = 640;
         this.panel.style.width = `${width}px`;
         this.panel.style.height = `${height}px`;
-        this.panel.style.left = `calc(50% - ${width/4}px)`
-        this.panel.style.top = `calc(50% - ${height/4}px)`
+        this.panel.style.left = `calc(50% - ${width / 4}px)`
+        this.panel.style.top = `calc(50% - ${height / 4}px)`
 
-		const rootHtml = `
+        const rootHtml = `
 <canvas class="openpose-editor-canvas" />
 <div class="canvas-drag-overlay" />
 <input bind:this={fileInput} class="openpose-file-input" type="file" accept=".json" />
 `;
-		const container = this.panel.addHTML(rootHtml, "openpose-container");
+        const container = this.panel.addHTML(rootHtml, "openpose-container");
         container.style.width = "100%";
         container.style.height = "100%";
         container.style.margin = "auto";
         container.style.display = "flex";
 
         const dragOverlay = container.querySelector(".canvas-drag-overlay")
-		dragOverlay.style.pointerEvents = "none";
-		dragOverlay.style.visibility = "hidden";
-		dragOverlay.style.display = "flex";
-		dragOverlay.style.alignItems = "center";
-		dragOverlay.style.justifyContent = "center";
-		dragOverlay.style.width = "100%";
-		dragOverlay.style.height = "100%";
-		dragOverlay.style.color = "white";
-		dragOverlay.style.fontSize = "2.5em";
-		dragOverlay.style.fontFamily = "inherit";
-		dragOverlay.style.fontWeight = "600";
-		dragOverlay.style.lineHeight = "100%";
-		dragOverlay.style.background = "rgba(0,0,0,0.5)";
-		dragOverlay.style.margin = "0.25rem";
-		dragOverlay.style.borderRadius = "0.25rem";
-		dragOverlay.style.border = "0.5px solid";
-		dragOverlay.style.position = "absolute";
+        dragOverlay.style.pointerEvents = "none";
+        dragOverlay.style.visibility = "hidden";
+        dragOverlay.style.display = "flex";
+        dragOverlay.style.alignItems = "center";
+        dragOverlay.style.justifyContent = "center";
+        dragOverlay.style.width = "100%";
+        dragOverlay.style.height = "100%";
+        dragOverlay.style.color = "white";
+        dragOverlay.style.fontSize = "2.5em";
+        dragOverlay.style.fontFamily = "inherit";
+        dragOverlay.style.fontWeight = "600";
+        dragOverlay.style.lineHeight = "100%";
+        dragOverlay.style.background = "rgba(0,0,0,0.5)";
+        dragOverlay.style.margin = "0.25rem";
+        dragOverlay.style.borderRadius = "0.25rem";
+        dragOverlay.style.border = "0.5px solid";
+        dragOverlay.style.position = "absolute";
 
-        this.canvasWidth = 512;
-        this.canvasHeight = 512;
+        let poses_info = getPosesFromAux();
 
-		this.canvasElem = container.querySelector(".openpose-editor-canvas")
-		this.canvasElem.width = this.canvasWidth
-		this.canvasElem.height = this.canvasHeight
-		this.canvasElem.style.margin = "0.25rem"
-		this.canvasElem.style.borderRadius = "0.25rem"
-		this.canvasElem.style.border = "0.5px solid"
+        this.canvasWidth = poses_info["width"];
+        this.canvasHeight = poses_info["height"];
 
-		this.canvas = this.initCanvas(this.canvasElem)
+        this.canvasElem = container.querySelector(".openpose-editor-canvas")
+        this.canvasElem.width = this.canvasWidth
+        this.canvasElem.height = this.canvasHeight
+        this.canvasElem.style.margin = "0.25rem"
+        this.canvasElem.style.borderRadius = "0.25rem"
+        this.canvasElem.style.border = "0.5px solid"
+
+        this.canvas = this.initCanvas(this.canvasElem)
+
+        let imgInstance = undefined;
+        if (poses_info["image"]) {
+            imgInstance = new fabric.Image(poses_info["image"], {
+                left: 0,
+                top: 0,
+                selectable: false,
+                hasBorders: false,
+                hasControls: false,
+                hasRotatingPoint: false
+            });
+            imgInstance.scaleToWidth(this.canvasWidth)
+            imgInstance.scaleToHeight(this.canvasHeight)
+        }
 
         this.fileInput = container.querySelector(".openpose-file-input");
         this.fileInput.style.display = "none";
         this.fileInput.addEventListener("change", this.onLoad.bind(this))
 
-		this.panel.addButton("Add", () => {
+        this.panel.addButton("Add", () => {
             this.addPose()
             this.saveToNode();
         });
-		this.panel.addButton("Remove", () => {
+        this.panel.addButton("Remove", () => {
             this.removePose()
             this.saveToNode();
         });
-		this.panel.addButton("Reset", () => {
+        this.panel.addButton("Reset", () => {
             this.resetCanvas()
             this.saveToNode();
         });
-		this.panel.addButton("Save", () => this.save());
-		this.panel.addButton("Load", () => this.load());
+        this.panel.addButton("Save", () => this.save());
+        this.panel.addButton("Load", () => this.load());
 
-		const widthLabel = document.createElement("label")
-		widthLabel.innerHTML = "Width"
-		widthLabel.style.fontFamily = "Arial"
-		widthLabel.style.padding = "0 0.5rem";
-		widthLabel.style.color = "#ccc";
-		this.widthInput = document.createElement("input")
-		this.widthInput.style.background = "#1c1c1c";
-		this.widthInput.style.color = "#aaa";
-		this.widthInput.setAttribute("type", "number")
-		this.widthInput.setAttribute("min", "64")
-		this.widthInput.setAttribute("max", "4096")
-		this.widthInput.setAttribute("step", "64")
-		this.widthInput.setAttribute("type", "number")
-		this.widthInput.addEventListener("change", () => {
-			this.resizeCanvas(+this.widthInput.value, +this.heightInput.value);
-			this.saveToNode();
-		})
+        const widthLabel = document.createElement("label")
+        widthLabel.innerHTML = "Width"
+        widthLabel.style.fontFamily = "Arial"
+        widthLabel.style.padding = "0 0.5rem";
+        widthLabel.style.color = "#ccc";
+        this.widthInput = document.createElement("input")
+        this.widthInput.style.background = "#1c1c1c";
+        this.widthInput.style.color = "#aaa";
+        this.widthInput.setAttribute("type", "number")
+        this.widthInput.setAttribute("min", "64")
+        this.widthInput.setAttribute("max", "4096")
+        this.widthInput.setAttribute("step", "64")
+        this.widthInput.setAttribute("type", "number")
+        this.widthInput.addEventListener("change", () => {
+            this.resizeCanvas(+this.widthInput.value, +this.heightInput.value);
+            this.saveToNode();
+        })
 
-		const heightLabel = document.createElement("label")
-		heightLabel.innerHTML = "Height"
-		heightLabel.style.fontFamily = "Arial"
-		heightLabel.style.padding = "0 0.5rem";
-		heightLabel.style.color = "#aaa";
-		this.heightInput = document.createElement("input")
-		this.heightInput.style.background = "#1c1c1c";
-		this.heightInput.style.color = "#ccc";
-		this.heightInput.setAttribute("type", "number")
-		this.heightInput.setAttribute("min", "64")
-		this.heightInput.setAttribute("max", "4096")
-		this.heightInput.setAttribute("step", "64")
-		this.heightInput.addEventListener("change", () => {
-			this.resizeCanvas(+this.widthInput.value, +this.heightInput.value);
-			this.saveToNode();
-		})
+        const heightLabel = document.createElement("label")
+        heightLabel.innerHTML = "Height"
+        heightLabel.style.fontFamily = "Arial"
+        heightLabel.style.padding = "0 0.5rem";
+        heightLabel.style.color = "#aaa";
+        this.heightInput = document.createElement("input")
+        this.heightInput.style.background = "#1c1c1c";
+        this.heightInput.style.color = "#ccc";
+        this.heightInput.setAttribute("type", "number")
+        this.heightInput.setAttribute("min", "64")
+        this.heightInput.setAttribute("max", "4096")
+        this.heightInput.setAttribute("step", "64")
+        this.heightInput.addEventListener("change", () => {
+            this.resizeCanvas(+this.widthInput.value, +this.heightInput.value);
+            this.saveToNode();
+        })
 
-		this.panel.footer.appendChild(widthLabel);
-		this.panel.footer.appendChild(this.widthInput);
-		this.panel.footer.appendChild(heightLabel);
-		this.panel.footer.appendChild(this.heightInput);
+        this.panel.footer.appendChild(widthLabel);
+        this.panel.footer.appendChild(this.widthInput);
+        this.panel.footer.appendChild(heightLabel);
+        this.panel.footer.appendChild(this.heightInput);
 
-        if (this.node.properties.savedPose) {
+        if (poses_info["poses"].length > 0) {
+
+            if (this.last_aux_poses === undefined) {
+                this.last_aux_poses = poses_info["poses"]
+            }
+
+            // if input image not change
+            if (JSON.stringify(this.last_aux_poses) === JSON.stringify(poses_info["poses"]) || poses_info["image"].src === this.last_img_src) {
+                if (this.node.properties.savedPose) {
+                    let error = this.loadJSON(this.node.properties.savedPose);
+                    if (!error) {
+                        poses_info["poses"] = JSON.parse(this.node.properties.savedPose)["keypoints"].flat()
+                    }
+                }
+            } else {
+                this.last_img_src = poses_info["image"].src
+                this.last_aux_poses = poses_info["poses"]
+            }
+            this.resizeCanvas(this.canvasWidth, this.canvasHeight)
+            this.setPose(poses_info["poses"], imgInstance)
+
+        } else if (this.node.properties.savedPose) {
             const error = this.loadJSON(this.node.properties.savedPose);
             if (error) {
                 console.error("[OpenPose Editor] Failed to restore saved pose JSON", error)
-				this.resizeCanvas(this.canvasWidth, this.canvasHeight)
+                this.resizeCanvas(this.canvasWidth, this.canvasHeight)
                 this.setPose(DEFAULT_KEYPOINTS)
             }
             this.undo_history.push(JSON.stringify(this.canvas));
+        } else {
+            this.resizeCanvas(this.canvasWidth, this.canvasHeight)
+            this.setPose(DEFAULT_KEYPOINTS, imgInstance)
         }
-        else {
-			this.resizeCanvas(this.canvasWidth, this.canvasHeight)
-            this.setPose(DEFAULT_KEYPOINTS)
+
+        const keyHandler = this.onKeyDown.bind(this);
+
+        document.addEventListener("keydown", keyHandler)
+        this.panel.onClose = () => {
+            document.removeEventListener("keydown", keyHandler)
+        }
+    }
+
+    onKeyDown(e) {
+        if (e.key === "z" && e.ctrlKey) {
+            this.undo()
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        } else if (e.key === "y" && e.ctrlKey) {
+            this.redo()
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        }
+    }
+
+    addPose(keypoints = undefined) {
+        if (keypoints === undefined) {
+            keypoints = DEFAULT_KEYPOINTS;
         }
 
-		const keyHandler = this.onKeyDown.bind(this);
-
-		document.addEventListener("keydown", keyHandler)
-		this.panel.onClose = () => {
-			document.removeEventListener("keydown", keyHandler)
-		}
-	}
-
-	onKeyDown(e) {
-		if (e.key === "z" && e.ctrlKey) {
-			this.undo()
-			e.preventDefault();
-			e.stopImmediatePropagation();
-		}
-		else if (e.key === "y" && e.ctrlKey) {
-			this.redo()
-			e.preventDefault();
-			e.stopImmediatePropagation();
-		}
-	}
-
-	addPose(keypoints = undefined){
-		if (keypoints === undefined){
-			keypoints = DEFAULT_KEYPOINTS;
-		}
-
-		const group = new fabric.Group([], {
+        const group = new fabric.Group([], {
             subTargetCheck: true,
             interactive: true
         })
 
-		function makeCircle(color, left, top, line1, line2, line3, line4, line5) {
-			var c = new fabric.Circle({
-				left: left,
-				top: top,
-				strokeWidth: 1,
-				radius: 5,
-				fill: color,
-				stroke: color,
-				originX: 'center',
-				originY: 'center',
-			});
-			c.hasControls = c.hasBorders = false;
+        function makeCircle(color, left, top, line1, line2, line3, line4, line5) {
+            var c = new fabric.Circle({
+                left: left,
+                top: top,
+                strokeWidth: 1,
+                radius: 5,
+                fill: color,
+                stroke: color,
+                originX: 'center',
+                originY: 'center',
+            });
+            c.hasControls = c.hasBorders = false;
 
-			c.line1 = line1;
-			c.line2 = line2;
-			c.line3 = line3;
-			c.line4 = line4;
-			c.line5 = line5;
+            c.line1 = line1;
+            c.line2 = line2;
+            c.line3 = line3;
+            c.line4 = line4;
+            c.line5 = line5;
 
-			return c;
-		}
+            return c;
+        }
 
-		function makeLine(coords, color) {
-			return new fabric.Line(coords, {
-				fill: color,
-				stroke: color,
-				strokeWidth: 10,
-				selectable: false,
-				evented: false,
-				originX: 'center',
-				originY: 'center',
-			});
-		}
+        function makeLine(coords, color) {
+            return new fabric.Line(coords, {
+                fill: color,
+                stroke: color,
+                strokeWidth: 10,
+                selectable: false,
+                evented: false,
+                originX: 'center',
+                originY: 'center',
+            });
+        }
 
-		const lines = []
-		const circles = []
+        const lines = []
+        const circles = []
 
-		for (let i = 0; i < connect_keypoints.length; i++){
-			// 接続されるidxを指定　[0, 1]なら0と1つなぐ
-			const item = connect_keypoints[i]
-			const line = makeLine(keypoints[item[0]].concat(keypoints[item[1]]), `rgba(${connect_color[i].join(", ")}, 0.7)`)
-			lines.push(line)
-			this.canvas.add(line)
-			line['id'] = item[0];
-		}
+        for (let i = 0; i < connect_keypoints.length; i++) {
+            // 接続されるidxを指定　[0, 1]なら0と1つなぐ
+            const item = connect_keypoints[i]
+            const line = makeLine(keypoints[item[0]].concat(keypoints[item[1]]), `rgba(${connect_color[i].join(", ")}, 0.7)`)
+            lines.push(line)
+            this.canvas.add(line)
+            line['id'] = item[0];
+        }
 
-        for (let i = 0; i < keypoints.length; i++){
+        for (let i = 0; i < keypoints.length; i++) {
             // const list = connect_keypoints.filter(item => item.includes(i));
             const list = []
             connect_keypoints.filter((item, idx) => {
-            	if(item.includes(i)){
-            		list.push(lines[idx])
-            		return idx
-            	}
+                if (item.includes(i)) {
+                    list.push(lines[idx])
+                    return idx
+                }
             })
             const circle = makeCircle(`rgb(${connect_color[i].join(", ")})`, keypoints[i][0], keypoints[i][1], ...list)
             circle["id"] = i
@@ -314,9 +406,14 @@ class OpenPosePanel {
         this.canvas.requestRenderAll();
     }
 
-    setPose(keypoints){
+    setPose(keypoints, img = undefined) {
         this.canvas.clear()
-        this.canvas.backgroundColor = "#000"
+        if (img !== undefined) {
+            this.canvas.add(img)
+        } else {
+            this.canvas.backgroundColor = "#000"
+        }
+
 
         const res = [];
         for (let i = 0; i < keypoints.length; i += 18) {
@@ -324,7 +421,7 @@ class OpenPosePanel {
             res.push(chunk);
         }
 
-        for (const item of res){
+        for (const item of res) {
             this.addPose(item)
             this.canvas.discardActiveObject();
         }
@@ -332,21 +429,21 @@ class OpenPosePanel {
         this.saveToNode();
     }
 
-    calcResolution(width, height){
+    calcResolution(width, height) {
         const viewportWidth = window.innerWidth / 2.25;
         const viewportHeight = window.innerHeight * 0.75;
         const ratio = Math.min(viewportWidth / width, viewportHeight / height);
         return {width: width * ratio, height: height * ratio}
     }
 
-    resizeCanvas(width, height){
+    resizeCanvas(width, height) {
         let resolution = this.calcResolution(width, height)
 
         this.canvasWidth = width;
         this.canvasHeight = height;
 
-		this.widthInput.value = `${width}`
-		this.heightInput.value = `${height}`
+        this.widthInput.value = `${width}`
+        this.heightInput.value = `${height}`
 
         this.canvas.setWidth(width);
         this.canvas.setHeight(height);
@@ -384,7 +481,7 @@ class OpenPosePanel {
         }
     }
 
-    initCanvas(elem){
+    initCanvas(elem) {
         const canvas = new fabric.Canvas(elem, {
             backgroundColor: '#000',
             // selection: false,
@@ -404,7 +501,7 @@ class OpenPosePanel {
                 if (target.angle === 0) {
                     const rtop = target.top
                     const rleft = target.left
-                    for (const item of target._objects){
+                    for (const item of target._objects) {
                         let p = item;
                         p.scaleX = 1;
                         p.scaleY = 1;
@@ -413,28 +510,28 @@ class OpenPosePanel {
                         p['_top'] = top;
                         p['_left'] = left;
                         if (p["id"] === 0) {
-                            p.line1 && p.line1.set({ 'x1': left, 'y1': top });
-                        }else{
-                            p.line1 && p.line1.set({ 'x2': left, 'y2': top });
+                            p.line1 && p.line1.set({'x1': left, 'y1': top});
+                        } else {
+                            p.line1 && p.line1.set({'x2': left, 'y2': top});
                         }
                         if (p['id'] === 14 || p['id'] === 15) {
                             p.radius = showEyes ? 5 : 0;
                             p.strokeWidth = showEyes ? 10 : 0;
                         }
-                        p.line2 && p.line2.set({ 'x1': left, 'y1': top });
-                        p.line3 && p.line3.set({ 'x1': left, 'y1': top });
-                        p.line4 && p.line4.set({ 'x1': left, 'y1': top });
-                        p.line5 && p.line5.set({ 'x1': left, 'y1': top });
+                        p.line2 && p.line2.set({'x1': left, 'y1': top});
+                        p.line3 && p.line3.set({'x1': left, 'y1': top});
+                        p.line4 && p.line4.set({'x1': left, 'y1': top});
+                        p.line5 && p.line5.set({'x1': left, 'y1': top});
 
                     }
                 } else {
                     const aCoords = target.aCoords;
-                    const center = {'x': (aCoords.tl.x + aCoords.br.x)/2, 'y': (aCoords.tl.y + aCoords.br.y)/2};
+                    const center = {'x': (aCoords.tl.x + aCoords.br.x) / 2, 'y': (aCoords.tl.y + aCoords.br.y) / 2};
                     const rad = target.angle * Math.PI / 180;
                     const sin = Math.sin(rad);
                     const cos = Math.cos(rad);
 
-                    for (const item of target._objects){
+                    for (const item of target._objects) {
                         let p = item;
                         const p_top = p.top * target.scaleY * flipY;
                         const p_left = p.left * target.scaleX * flipX;
@@ -443,19 +540,19 @@ class OpenPosePanel {
                         p['_top'] = top;
                         p['_left'] = left;
                         if (p["id"] === 0) {
-                            p.line1 && p.line1.set({ 'x1': left, 'y1': top });
-                        }else{
-                            p.line1 && p.line1.set({ 'x2': left, 'y2': top });
+                            p.line1 && p.line1.set({'x1': left, 'y1': top});
+                        } else {
+                            p.line1 && p.line1.set({'x2': left, 'y2': top});
                         }
                         if (p['id'] === 14 || p['id'] === 15) {
                             p.radius = showEyes ? 5 : 0.3;
                             if (p.line1) p.line1.strokeWidth = showEyes ? 10 : 0;
                             if (p.line2) p.line2.strokeWidth = showEyes ? 10 : 0;
                         }
-                        p.line2 && p.line2.set({ 'x1': left, 'y1': top });
-                        p.line3 && p.line3.set({ 'x1': left, 'y1': top });
-                        p.line4 && p.line4.set({ 'x1': left, 'y1': top });
-                        p.line5 && p.line5.set({ 'x1': left, 'y1': top });
+                        p.line2 && p.line2.set({'x1': left, 'y1': top});
+                        p.line3 && p.line3.set({'x1': left, 'y1': top});
+                        p.line4 && p.line4.set({'x1': left, 'y1': top});
+                        p.line5 && p.line5.set({'x1': left, 'y1': top});
                     }
                 }
                 target.setCoords();
@@ -469,7 +566,7 @@ class OpenPosePanel {
                 const showEyes = this.flipped ? !this.visibleEyes : this.visibleEyes;
 
                 const aCoords = group.aCoords;
-                const center = {'x': (aCoords.tl.x + aCoords.br.x)/2, 'y': (aCoords.tl.y + aCoords.br.y)/2};
+                const center = {'x': (aCoords.tl.x + aCoords.br.x) / 2, 'y': (aCoords.tl.y + aCoords.br.y) / 2};
                 const rad = target.angle * Math.PI / 180;
                 const sin = Math.sin(rad);
                 const cos = Math.cos(rad);
@@ -480,14 +577,14 @@ class OpenPosePanel {
                 const top = center.y + p_left * sin + p_top * cos;
 
                 if (p["id"] === 0) {
-                    p.line1 && p.line1.set({ 'x1': left, 'y1': top });
-                }else{
-                    p.line1 && p.line1.set({ 'x2': left, 'y2': top });
+                    p.line1 && p.line1.set({'x1': left, 'y1': top});
+                } else {
+                    p.line1 && p.line1.set({'x2': left, 'y2': top});
                 }
-                p.line2 && p.line2.set({ 'x1': left, 'y1': top });
-                p.line3 && p.line3.set({ 'x1': left, 'y1': top });
-                p.line4 && p.line4.set({ 'x1': left, 'y1': top });
-                p.line5 && p.line5.set({ 'x1': left, 'y1': top });
+                p.line2 && p.line2.set({'x1': left, 'y1': top});
+                p.line3 && p.line3.set({'x1': left, 'y1': top});
+                p.line4 && p.line4.set({'x1': left, 'y1': top});
+                p.line5 && p.line5.set({'x1': left, 'y1': top});
 
                 group.setCoords();
             }
@@ -529,6 +626,8 @@ class OpenPosePanel {
 
     saveToNode() {
         this.node.setProperty("savedPose", this.serializeJSON());
+        this.node.setProperty("savedLastPoses", this.last_aux_poses);
+        this.node.setProperty("savedLastImgSrc", this.last_img_src);
         this.uploadCanvasAsFile()
     }
 
@@ -558,30 +657,30 @@ class OpenPosePanel {
     }
 
     async uploadCanvasAsFile() {
-		try {
+        try {
             const blob = await this.captureCanvasClean()
             const filename = `ComfyUI_OpenPose_${this.node.id}.png`;
 
-			const body = new FormData();
-			body.append("image", blob, filename);
-			body.append("overwrite", "true");
+            const body = new FormData();
+            body.append("image", blob, filename);
+            body.append("overwrite", "true");
 
-			const resp = await fetch("/upload/image", {
-				method: "POST",
-				body,
-			});
+            const resp = await fetch("/upload/image", {
+                method: "POST",
+                body,
+            });
 
-			if (resp.status === 200) {
-				const data = await resp.json();
+            if (resp.status === 200) {
+                const data = await resp.json();
                 await this.node.setImage(data.name)
-			} else {
+            } else {
                 console.error(resp.status + " - " + resp.statusText)
-				alert(resp.status + " - " + resp.statusText);
-			}
-		} catch (error) {
+                alert(resp.status + " - " + resp.statusText);
+            }
+        } catch (error) {
             console.error(error)
-			alert(error);
-		}
+            alert(error);
+        }
     }
 
     removePose() {
@@ -589,7 +688,7 @@ class OpenPosePanel {
         if (!selection || !("lines" in selection))
             return;
 
-        for (const line of selection.lines){
+        for (const line of selection.lines) {
             this.canvas.remove(line)
         }
 
@@ -612,8 +711,7 @@ class OpenPosePanel {
         const error = await this.loadJSON(text);
         if (error != null) {
             app.ui.dialog.show(error);
-        }
-        else {
+        } else {
             this.saveToNode();
         }
     }
@@ -658,8 +756,7 @@ class OpenPosePanel {
         for (const group of keypoints) {
             if (group.length % 18 === 0) {
                 this.addPose(group)
-            }
-            else {
+            } else {
                 return 'keypoints is invalid'
             }
         }
@@ -670,7 +767,7 @@ class OpenPosePanel {
 app.registerExtension({
     name: "Nui.OpenPoseEditor",
 
-	async beforeRegisterNodeDef(nodeType, nodeData, app) {
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name !== "Nui.OpenPoseEditor") {
             return
         }
@@ -687,6 +784,8 @@ app.registerExtension({
             if (!this.properties) {
                 this.properties = {};
                 this.properties.savedPose = "";
+                this.properties.savedLastPoses = "";
+                this.properties.savedLastImgSrc = "";
             }
 
             this.serialize_widgets = true;
@@ -698,6 +797,12 @@ app.registerExtension({
             console.error(this);
 
             // Non-serialized widgets
+            this.jsonWidget = this.addWidget("text", "", this.properties.savedLastPoses, "savedLastPoses");
+            this.jsonWidget.disabled = true
+            this.jsonWidget.serialize = true
+            this.jsonWidget = this.addWidget("text", "", this.properties.savedLastImgSrc, "savedLastImgSrc");
+            this.jsonWidget.disabled = true
+            this.jsonWidget.serialize = true
             this.jsonWidget = this.addWidget("text", "", this.properties.savedPose, "savedPose");
             this.jsonWidget.disabled = true
             this.jsonWidget.serialize = true
@@ -707,7 +812,7 @@ app.registerExtension({
                 if (graphCanvas == null)
                     return;
 
-                const panel = graphCanvas.createPanel("OpenPose Editor", { closable: true });
+                const panel = graphCanvas.createPanel("OpenPose Editor", {closable: true});
                 panel.node = this;
                 panel.classList.add("openpose-editor");
 
@@ -726,7 +831,7 @@ app.registerExtension({
             });
         }
 
-        nodeType.prototype.showImage = async function(name) {
+        nodeType.prototype.showImage = async function (name) {
             let folder_separator = name.lastIndexOf("/");
             let subfolder = "";
             if (folder_separator > -1) {
@@ -739,18 +844,17 @@ app.registerExtension({
             app.graph.setDirtyCanvas(true);
         }
 
-        nodeType.prototype.setImage = async function(name) {
+        nodeType.prototype.setImage = async function (name) {
             this.imageWidget.value = name;
             await this.showImage(name);
         }
 
         const onPropertyChanged = nodeType.prototype.onPropertyChanged;
-        nodeType.prototype.onPropertyChanged = function(property, value) {
+        nodeType.prototype.onPropertyChanged = function (property, value) {
             if (property === "savedPose") {
                 this.jsonWidget.value = value;
-            }
-            else {
-                if(onPropertyChanged)
+            } else {
+                if (onPropertyChanged)
                     onPropertyChanged.apply(this, arguments)
             }
         }

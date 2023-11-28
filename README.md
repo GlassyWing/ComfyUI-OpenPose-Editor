@@ -1,10 +1,13 @@
-# OpenPose Editor for ComfyUI
+# OpenPose Editor for Comfyui Controlnet Aux
 
-A port of the [openpose-editor](https://github.com/fkunn1326/openpose-editor) extension for stable-diffusion-webui, now compatible with [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+A port of the [openpose-editor](https://github.com/fkunn1326/openpose-editor) extension for [comfyui_controlnet_aux](https://github.com/Fannovel16/comfyui_controlnet_aux)
 
-![Screenshot](./screenshot1.png)
-![Screenshot](./screenshot2.png)
-
+![simple_workflow.png](assets%2Fsimple_workflow.png)
+![editor.png](assets%2Feditor.png)
 ## Usage
 
-Import the `image > OpenPose Editor` node, add a new pose and use it like you would a `LoadImage` node. Each change you make to the pose will be saved to the input folder of ComfyUI.
+1. Build the `Comfyui-Controlnet-Aux > OpenPose|DWPose` node
+2. Import the `image > OpenPose Editor` node
+3. Run `Ctrl + Enter` to get the openpose info
+4. Clik `open editor` in `OpenPose Editor` then do you want
+
