@@ -1,5 +1,4 @@
 import {app} from "/scripts/app.js";
-import {ComfyWidgets} from "/scripts/widgets.js";
 import "./fabric.min.js";
 
 const connect_keypoints = [
@@ -41,6 +40,13 @@ const DEFAULT_KEYPOINTS = [
     [225, 70], [260, 72]
 ]
 
+const DEFAULT_FRAME = {
+    "width": 512,
+    "height": 512,
+    "pose2d": DEFAULT_KEYPOINTS,
+    "image": undefined
+}
+
 async function readFileToText(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -72,34 +78,38 @@ async function canvasToBlob(canvas) {
     });
 }
 
-function getPosesFromAux() {
-    let result = {}
-    result["width"] = 512
-    result["height"] = 512
-    result["poses"] = []
-    result["image"] = undefined
-    const poseNodes = app.graph._nodes.filter(node => ["OpenposePreprocessor", "DWPreprocessor"].includes(node.type))
-    for (const poseNode of poseNodes) {
+function getPosesFromAux(poseNode, backgrounds) {
+    let results = [];
 
-        if (!(poseNode.id in app.nodeOutputs) || !("openpose_json" in app.nodeOutputs[poseNode.id])) {
-            continue
-        }
+    if (!(poseNode.id in app.nodeOutputs) || !("openpose_json" in app.nodeOutputs[poseNode.id])) {
+        return results;
+    }
 
-        const openpose = JSON.parse(app.nodeOutputs[poseNode.id].openpose_json[0])
+    let openpose_json = [];
+    for (const json_str of app.nodeOutputs[poseNode.id].openpose_json) {
+        openpose_json.push(JSON.parse(json_str))
+    }
+
+    console.assert(openpose_json.length === backgrounds.length)
+
+    for (let i = 0; i < openpose_json.length; i++) {
+        const openpose = openpose_json[i];
+        const background_info = backgrounds[i];
+        let result = {}
         const canvas_width = openpose["canvas_width"]
         const canvas_height = openpose["canvas_height"]
         result["width"] = canvas_width
         result["height"] = canvas_height
 
-        if (!("origin_id" in app.graph.links[poseNode.inputs[0].link])) {
-            continue
-        }
-
-        // get input image
-        let image_node_id = app.graph.links[poseNode.inputs[0].link]["origin_id"]
-        // console.log(app.graph._nodes[poseNode.outputs[0].links[0]])
-        let img = app.graph._nodes_by_id[image_node_id].imgs[0]
-        result["image"] = img
+        // TODO: support face and hand keypoints
+        result["pose2d"] = []
+        result["face2d"] = []
+        result["hand_left2d"] = []
+        result["hand_right2d"] = []
+        const e = new Image();
+        e.setAttribute('crossorigin', 'anonymous');
+        e.src = `/view?filename=${background_info["filename"]}&type=temp&subfolder=`;
+        result["image"] = e;
 
         let last_x = 0
         let last_y = 0
@@ -118,11 +128,32 @@ function getPosesFromAux() {
                     x = last_x + 1
                     y = last_y + 1
                 }
-                result["poses"].push([x, y])
+                result["pose2d"].push([x, y])
             }
         }
+
+        results.push(result)
     }
-    return result
+
+    return results;
+}
+
+function createCanvasBackground(img, width, height) {
+    let imgInstance = undefined;
+    if (img) {
+
+        imgInstance = new fabric.Image(img, {
+            left: 0,
+            top: 0,
+            selectable: false,
+            hasBorders: false,
+            hasControls: false,
+            hasRotatingPoint: false
+        });
+        imgInstance.scaleToWidth(width)
+        imgInstance.scaleToHeight(height)
+    }
+    return imgInstance
 }
 
 class OpenPosePanel {
@@ -142,10 +173,11 @@ class OpenPosePanel {
         this.panel = panel;
         this.node = node;
         this.last_aux_poses = this.node.properties.savedLastPoses
-        this.last_img_src = this.node.properties.savedLastImgSrc
+        this.last_frame_idx = this.node.properties.savedLastFrameIdx
+        this.last_frame_idx = this.last_frame_idx === undefined ? 0 : this.last_frame_idx
 
-        const width = 640;
-        const height = 640;
+        const height = window.innerHeight * (1.0 - 0.15);
+        const width = Math.min(window.innerWidth * (1.0 - 0.15), height);
         this.panel.style.width = `${width}px`;
         this.panel.style.height = `${height}px`;
         this.panel.style.left = `calc(50% - ${width / 4}px)`
@@ -181,10 +213,22 @@ class OpenPosePanel {
         dragOverlay.style.border = "0.5px solid";
         dragOverlay.style.position = "absolute";
 
-        let poses_info = getPosesFromAux();
+        // Find the openpose node link to this node.
+        const openpose_node_link = this.node.inputs.filter(input => "openpose_images" === input.name)[0].link
 
-        this.canvasWidth = poses_info["width"];
-        this.canvasHeight = poses_info["height"];
+        if (openpose_node_link) {
+            const openpose_node = app.graph._nodes_by_id[app.graph.links[openpose_node_link]["origin_id"]]
+            // Fetch all poses and backgrounds
+            let backgrounds = app.nodeOutputs[this.node.id]["backgrounds"]
+
+            this.poses = getPosesFromAux(openpose_node, backgrounds);
+        } else {
+            this.poses = []
+            this.last_frame_idx = 0;
+        }
+
+        this.canvasWidth = this.poses.length > 0 ? this.poses[0]["width"] : DEFAULT_FRAME["width"];
+        this.canvasHeight = this.poses.length > 0 ? this.poses[0]["height"] : DEFAULT_FRAME["height"];
 
         this.canvasElem = container.querySelector(".openpose-editor-canvas")
         this.canvasElem.width = this.canvasWidth
@@ -194,21 +238,6 @@ class OpenPosePanel {
         this.canvasElem.style.border = "0.5px solid"
 
         this.canvas = this.initCanvas(this.canvasElem)
-
-        let imgInstance = undefined;
-        if (poses_info["image"]) {
-            imgInstance = new fabric.Image(poses_info["image"], {
-                left: 0,
-                top: 0,
-                selectable: false,
-                hasBorders: false,
-                hasControls: false,
-                hasRotatingPoint: false
-            });
-            imgInstance.scaleToWidth(this.canvasWidth)
-            imgInstance.scaleToHeight(this.canvasHeight)
-        }
-
         this.fileInput = container.querySelector(".openpose-file-input");
         this.fileInput.style.display = "none";
         this.fileInput.addEventListener("change", this.onLoad.bind(this))
@@ -242,7 +271,9 @@ class OpenPosePanel {
         this.widthInput.setAttribute("step", "64")
         this.widthInput.setAttribute("type", "number")
         this.widthInput.addEventListener("change", () => {
-            this.resizeCanvas(+this.widthInput.value, +this.heightInput.value);
+            this.canvasWidth = this.widthInput.value
+            this.canvasHeight = this.heightInput.value
+            this.resizeCanvas(this.canvasWidth, this.canvasHeight);
             this.saveToNode();
         })
 
@@ -259,7 +290,9 @@ class OpenPosePanel {
         this.heightInput.setAttribute("max", "4096")
         this.heightInput.setAttribute("step", "64")
         this.heightInput.addEventListener("change", () => {
-            this.resizeCanvas(+this.widthInput.value, +this.heightInput.value);
+            this.canvasWidth = this.widthInput.value
+            this.canvasHeight = this.heightInput.value
+            this.resizeCanvas(this.canvasWidth, this.canvasHeight);
             this.saveToNode();
         })
 
@@ -268,39 +301,62 @@ class OpenPosePanel {
         this.panel.footer.appendChild(heightLabel);
         this.panel.footer.appendChild(this.heightInput);
 
-        if (poses_info["poses"].length > 0) {
+        const frameIdxLabel = document.createElement("label")
+        const frameSizeLabel = document.createElement("label")
+        frameIdxLabel.innerHTML = "Frame"
+        frameIdxLabel.style.fontFamily = "Arial"
+        frameIdxLabel.style.padding = "0 0.5rem";
+        frameIdxLabel.style.color = "#aaa";
+        frameSizeLabel.innerHTML = ` / ${this.poses.length > 0 ? this.poses.length : 1}`
+        frameSizeLabel.style.fontFamily = "Arial"
+        frameSizeLabel.style.padding = "0 0.5rem";
+        frameSizeLabel.style.color = "#aaa";
+        this.frameIdxInput = document.createElement("input")
+        this.frameIdxInput.style.background = "#1c1c1c";
+        this.frameIdxInput.style.color = "#ccc";
+        this.frameIdxInput.setAttribute("type", "number")
+        this.frameIdxInput.setAttribute("min", "1")
+        this.frameIdxInput.setAttribute("max", `${this.poses.length > 0 ? this.poses.length : 1}`)
+        this.frameIdxInput.setAttribute("step", "1")
+        this.frameIdxInput.value = this.last_frame_idx + 1;
+        this.frameIdxInput.addEventListener("change", () => {
+            this.last_frame_idx = (+this.frameIdxInput.value) - 1;
+            this.refreshFrame(this.getCurFrame())
+        })
+
+
+        this.panel.footer.appendChild(frameIdxLabel);
+        this.panel.footer.appendChild(this.frameIdxInput);
+        this.panel.footer.appendChild(frameSizeLabel);
+
+        if (this.poses.length > 0) {
 
             if (this.last_aux_poses === undefined) {
-                this.last_aux_poses = poses_info["poses"]
+                this.last_aux_poses = this.poses;
             }
 
-            // if input image not change
-            if (JSON.stringify(this.last_aux_poses) === JSON.stringify(poses_info["poses"]) || poses_info["image"].src === this.last_img_src) {
-                if (this.node.properties.savedPose) {
-                    let error = this.loadJSON(this.node.properties.savedPose);
-                    if (!error) {
-                        poses_info["poses"] = JSON.parse(this.node.properties.savedPose)["keypoints"].flat()
+            // if input image not change (means the poses not change)
+            if (JSON.stringify(this.last_aux_poses) === JSON.stringify(this.poses)) {
+                // load last edited poses if exists.
+                if (this.node.properties.savedPoses) {
+                    let images = [];
+                    for (const pose of this.poses) {
+                        images.push(pose["image"])
+                    }
+                    this.poses = JSON.parse(this.node.properties.savedPoses)
+                    for (let i = 0; i < this.poses.length; i++) {
+                        this.poses[i]["image"] = images[i]
                     }
                 }
             } else {
-                this.last_img_src = poses_info["image"].src
-                this.last_aux_poses = poses_info["poses"]
+                this.last_aux_poses = this.poses
             }
-            this.resizeCanvas(this.canvasWidth, this.canvasHeight)
-            this.setPose(poses_info["poses"], imgInstance)
-
-        } else if (this.node.properties.savedPose) {
-            const error = this.loadJSON(this.node.properties.savedPose);
-            if (error) {
-                console.error("[OpenPose Editor] Failed to restore saved pose JSON", error)
-                this.resizeCanvas(this.canvasWidth, this.canvasHeight)
-                this.setPose(DEFAULT_KEYPOINTS)
-            }
+        } else if (this.node.properties.savedPoses) {
+            this.poses = JSON.parse(this.node.properties.savedPoses)
             this.undo_history.push(JSON.stringify(this.canvas));
-        } else {
-            this.resizeCanvas(this.canvasWidth, this.canvasHeight)
-            this.setPose(DEFAULT_KEYPOINTS, imgInstance)
         }
+
+        this.refreshFrame(this.getCurFrame())
 
         const keyHandler = this.onKeyDown.bind(this);
 
@@ -308,6 +364,20 @@ class OpenPosePanel {
         this.panel.onClose = () => {
             document.removeEventListener("keydown", keyHandler)
         }
+    }
+
+    getCurFrame() {
+        if (this.poses.length === 0) {
+            return DEFAULT_FRAME;
+        }
+        return this.poses[this.last_frame_idx]
+    }
+
+    refreshFrame(frame) {
+        this.resetCanvas()
+        this.resizeCanvas(this.canvasWidth, this.canvasHeight)
+        this.setPose(frame["pose2d"], createCanvasBackground(frame["image"],
+            this.canvasWidth, this.canvasHeight))
     }
 
     onKeyDown(e) {
@@ -408,12 +478,11 @@ class OpenPosePanel {
 
     setPose(keypoints, img = undefined) {
         this.canvas.clear()
-        if (img !== undefined) {
+        if (img || img === {}) {
             this.canvas.add(img)
         } else {
             this.canvas.backgroundColor = "#000"
         }
-
 
         const res = [];
         for (let i = 0; i < keypoints.length; i += 18) {
@@ -625,9 +694,17 @@ class OpenPosePanel {
     }
 
     saveToNode() {
-        this.node.setProperty("savedPose", this.serializeJSON());
+
+        let canvas_capture = this.captureToJSON()
+        this.poses[this.last_frame_idx]["height"] = canvas_capture["height"]
+        this.poses[this.last_frame_idx]["width"] = canvas_capture["width"]
+        this.poses[this.last_frame_idx]["pose2d"] = canvas_capture["pose2d"]
+        this.canvasWidth = canvas_capture["width"]
+        this.canvasHeight = canvas_capture["height"]
+
+        this.node.setProperty("savedPoses", this.serializeJSON());
         this.node.setProperty("savedLastPoses", this.last_aux_poses);
-        this.node.setProperty("savedLastImgSrc", this.last_img_src);
+        this.node.setProperty("savedLastFrameIdx", this.last_frame_idx);
         this.uploadCanvasAsFile()
     }
 
@@ -659,7 +736,7 @@ class OpenPosePanel {
     async uploadCanvasAsFile() {
         try {
             const blob = await this.captureCanvasClean()
-            const filename = `ComfyUI_OpenPose_${this.node.id}.png`;
+            const filename = `ComfyUI_OpenPose_${this.node.id}_${this.last_frame_idx}.png`;
 
             const body = new FormData();
             body.append("image", blob, filename);
@@ -716,19 +793,23 @@ class OpenPosePanel {
         }
     }
 
-    serializeJSON() {
+    captureToJSON() {
         const groups = this.canvas.getObjects().filter(i => i.type === "group");
         const keypoints = groups.map(g => {
             const circles = g.getObjects().filter(i => i.type === "circle");
-            return circles.map(c => [c.oCoords.tl.x, c.oCoords.tl.y]);
+            return circles.map(c =>
+                [(c.oCoords.tl.x + c.oCoords.tr.x) / 2,
+                    (c.oCoords.tl.y + c.oCoords.bl.y) / 2]);
         })
-
-        const json = JSON.stringify({
+        return {
             "width": this.canvas.width,
             "height": this.canvas.height,
-            "keypoints": keypoints
-        }, null, 4)
-        return json;
+            "pose2d": keypoints.flat()
+        }
+    }
+
+    serializeJSON() {
+        return JSON.stringify(this.poses, null, 4);
     }
 
     save() {
@@ -783,9 +864,10 @@ app.registerExtension({
 
             if (!this.properties) {
                 this.properties = {};
-                this.properties.savedPose = "";
+                this.properties.savedPoses = "";
                 this.properties.savedLastPoses = "";
                 this.properties.savedLastImgSrc = "";
+                this.properties.savedLastFrameIdx = 0;
             }
 
             this.serialize_widgets = true;
@@ -797,13 +879,13 @@ app.registerExtension({
             console.error(this);
 
             // Non-serialized widgets
+            this.jsonWidget = this.addWidget("text", "", this.properties.savedLastFrameIdx, "savedLastFrameIdx");
+            this.jsonWidget.disabled = true
+            this.jsonWidget.serialize = true
             this.jsonWidget = this.addWidget("text", "", this.properties.savedLastPoses, "savedLastPoses");
             this.jsonWidget.disabled = true
             this.jsonWidget.serialize = true
-            this.jsonWidget = this.addWidget("text", "", this.properties.savedLastImgSrc, "savedLastImgSrc");
-            this.jsonWidget.disabled = true
-            this.jsonWidget.serialize = true
-            this.jsonWidget = this.addWidget("text", "", this.properties.savedPose, "savedPose");
+            this.jsonWidget = this.addWidget("text", "", this.properties.savedPoses, "savedPoses");
             this.jsonWidget.disabled = true
             this.jsonWidget.serialize = true
 
@@ -851,7 +933,7 @@ app.registerExtension({
 
         const onPropertyChanged = nodeType.prototype.onPropertyChanged;
         nodeType.prototype.onPropertyChanged = function (property, value) {
-            if (property === "savedPose") {
+            if (property === "savedPoses") {
                 this.jsonWidget.value = value;
             } else {
                 if (onPropertyChanged)
