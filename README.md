@@ -16,6 +16,7 @@ A port of the [openpose-editor](https://github.com/fkunn1326/openpose-editor) ex
 
 **_Note_**: You must  run `Comfyui-Controlnet-Aux > OpenPose|DWPose` first to get nessecery openpose info.
 
-## Know issues
+## Todos
 
-1. The background may not be show in first open, try open it twice.
+1. [x] Right-click to toggle the visibility of the line connected to that point.
+2. [ ] Partial selection

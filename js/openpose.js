@@ -33,11 +33,11 @@ const connect_color = [
 ]
 
 const DEFAULT_KEYPOINTS = [
-    [241, 77], [241, 120], [191, 118], [177, 183],
-    [163, 252], [298, 118], [317, 182], [332, 245],
-    [225, 241], [213, 359], [215, 454], [270, 240],
-    [282, 360], [286, 456], [232, 59], [253, 60],
-    [225, 70], [260, 72]
+    [241, 77, 1], [241, 120, 1], [191, 118, 1], [177, 183, 1],
+    [163, 252, 1], [298, 118, 1], [317, 182, 1], [332, 245, 1],
+    [225, 241, 1], [213, 359, 1], [215, 454, 1], [270, 240, 1],
+    [282, 360, 1], [286, 456, 1], [232, 59, 1], [253, 60, 1],
+    [225, 70, 1], [260, 72, 1]
 ]
 
 const DEFAULT_FRAME = {
@@ -78,7 +78,7 @@ async function canvasToBlob(canvas) {
     });
 }
 
-function getPosesFromAux(poseNode, backgrounds) {
+function getPosesFromAux(poseNode) {
     let results = [];
 
     if (!(poseNode.id in app.nodeOutputs) || !("openpose_json" in app.nodeOutputs[poseNode.id])) {
@@ -90,11 +90,9 @@ function getPosesFromAux(poseNode, backgrounds) {
         openpose_json.push(JSON.parse(json_str))
     }
 
-    console.assert(openpose_json.length === backgrounds.length)
 
     for (let i = 0; i < openpose_json.length; i++) {
         const openpose = openpose_json[i];
-        const background_info = backgrounds[i];
         let result = {}
         const canvas_width = openpose["canvas_width"]
         const canvas_height = openpose["canvas_height"]
@@ -103,13 +101,11 @@ function getPosesFromAux(poseNode, backgrounds) {
 
         // TODO: support face and hand keypoints
         result["pose2d"] = []
+        result["pose2d_visible"] = []
         result["face2d"] = []
         result["hand_left2d"] = []
         result["hand_right2d"] = []
-        const e = new Image();
-        e.setAttribute('crossorigin', 'anonymous');
-        e.src = `/view?filename=${background_info["filename"]}&type=temp&subfolder=`;
-        result["image"] = e;
+        result["image"] = {}
 
         let last_x = 0
         let last_y = 0
@@ -128,7 +124,7 @@ function getPosesFromAux(poseNode, backgrounds) {
                     x = last_x + 1
                     y = last_y + 1
                 }
-                result["pose2d"].push([x, y])
+                result["pose2d"].push([x, y, 1])
             }
         }
 
@@ -218,10 +214,7 @@ class OpenPosePanel {
 
         if (openpose_node_link) {
             const openpose_node = app.graph._nodes_by_id[app.graph.links[openpose_node_link]["origin_id"]]
-            // Fetch all poses and backgrounds
-            let backgrounds = app.nodeOutputs[this.node.id]["backgrounds"]
-
-            this.poses = getPosesFromAux(openpose_node, backgrounds);
+            this.poses = getPosesFromAux(openpose_node);
         } else {
             this.poses = []
             this.last_frame_idx = 0;
@@ -332,28 +325,37 @@ class OpenPosePanel {
         if (this.poses.length > 0) {
 
             if (this.last_aux_poses === undefined) {
-                this.last_aux_poses = this.poses;
+                this.last_aux_poses = JSON.stringify(this.poses);
             }
 
             // if input image not change (means the poses not change)
-            if (JSON.stringify(this.last_aux_poses) === JSON.stringify(this.poses)) {
+            if (this.last_aux_poses === JSON.stringify(this.poses)) {
                 // load last edited poses if exists.
                 if (this.node.properties.savedPoses) {
-                    let images = [];
-                    for (const pose of this.poses) {
-                        images.push(pose["image"])
-                    }
                     this.poses = JSON.parse(this.node.properties.savedPoses)
-                    for (let i = 0; i < this.poses.length; i++) {
-                        this.poses[i]["image"] = images[i]
-                    }
                 }
             } else {
-                this.last_aux_poses = this.poses
+                this.last_aux_poses = JSON.stringify(this.poses);
             }
         } else if (this.node.properties.savedPoses) {
             this.poses = JSON.parse(this.node.properties.savedPoses)
             this.undo_history.push(JSON.stringify(this.canvas));
+        }
+
+        let backgrounds = undefined;
+        // Fetch all poses and backgrounds
+        if (this.node.id in app.nodeOutputs && "backgrounds" in app.nodeOutputs[this.node.id]) {
+            backgrounds = app.nodeOutputs[this.node.id]["backgrounds"]
+        }
+
+        if (backgrounds) {
+            console.assert(backgrounds.length === this.poses.length)
+            for (let i = 0; i < this.poses.length; i++) {
+                const e = new Image();
+                e.setAttribute('crossorigin', 'anonymous');
+                e.src = `/view?filename=${backgrounds[i]["filename"]}&type=temp&subfolder=`;
+                this.poses[i]["image"] = e;
+            }
         }
 
         this.refreshFrame(this.getCurFrame())
@@ -376,8 +378,24 @@ class OpenPosePanel {
     refreshFrame(frame) {
         this.resetCanvas()
         this.resizeCanvas(this.canvasWidth, this.canvasHeight)
-        this.setPose(frame["pose2d"], createCanvasBackground(frame["image"],
-            this.canvasWidth, this.canvasHeight))
+        if (frame["image"] && frame["image"] !== {}) {
+            fabric.util.loadImage(frame["image"].src).then((img) => {
+                let imgInstance = new fabric.Image(img, {
+                    left: 0,
+                    top: 0,
+                    selectable: false,
+                    originX: 'left',
+                    originY: 'top',
+                })
+                imgInstance.scaleToWidth(this.canvasWidth);
+                imgInstance.scaleToHeight(this.canvasHeight);
+                this.canvas.clear()
+                this.canvas.add(imgInstance);
+                this.setPose(frame["pose2d"], undefined, false)
+            })
+        } else {
+            this.setPose(frame["pose2d"], undefined, true)
+        }
     }
 
     onKeyDown(e) {
@@ -392,7 +410,7 @@ class OpenPosePanel {
         }
     }
 
-    addPose(keypoints = undefined) {
+    addPose(keypoints = undefined, group_id = 0) {
         if (keypoints === undefined) {
             keypoints = DEFAULT_KEYPOINTS;
         }
@@ -401,6 +419,8 @@ class OpenPosePanel {
             subTargetCheck: true,
             interactive: true
         })
+
+        group.id = group_id
 
         function makeCircle(color, left, top, line1, line2, line3, line4, line5) {
             var c = new fabric.Circle({
@@ -424,7 +444,7 @@ class OpenPosePanel {
             return c;
         }
 
-        function makeLine(coords, color) {
+        function makeLine(coords, color, visible = true) {
             return new fabric.Line(coords, {
                 fill: color,
                 stroke: color,
@@ -433,6 +453,7 @@ class OpenPosePanel {
                 evented: false,
                 originX: 'center',
                 originY: 'center',
+                visible: visible,
             });
         }
 
@@ -440,9 +461,19 @@ class OpenPosePanel {
         const circles = []
 
         for (let i = 0; i < connect_keypoints.length; i++) {
-            // 接続されるidxを指定　[0, 1]なら0と1つなぐ
             const item = connect_keypoints[i]
-            const line = makeLine(keypoints[item[0]].concat(keypoints[item[1]]), `rgba(${connect_color[i].join(", ")}, 0.7)`)
+            let p0 = keypoints[item[0]]
+            let p1 = keypoints[item[1]]
+            let visible = true;
+
+            if (item[1] === 0) {
+                visible = p0[2] === 1
+            } else {
+                visible = p1[2] === 1
+            }
+            const line = makeLine(
+                [p0[0], p0[1], p1[0], p1[1]],
+                `rgba(${connect_color[i].join(", ")}, 0.7)`, visible)
             lines.push(line)
             this.canvas.add(line)
             line['id'] = item[0];
@@ -476,11 +507,9 @@ class OpenPosePanel {
         this.canvas.requestRenderAll();
     }
 
-    setPose(keypoints, img = undefined) {
-        this.canvas.clear()
-        if (img || img === {}) {
-            this.canvas.add(img)
-        } else {
+    setPose(keypoints, img = undefined, clear = true) {
+        if (clear) {
+            this.canvas.clear()
             this.canvas.backgroundColor = "#000"
         }
 
@@ -554,7 +583,9 @@ class OpenPosePanel {
         const canvas = new fabric.Canvas(elem, {
             backgroundColor: '#000',
             // selection: false,
-            preserveObjectStacking: true
+            preserveObjectStacking: true,
+            fireRightClick: true,
+            stopContextMenu: true
         });
 
         this.undo_history = [];
@@ -659,6 +690,22 @@ class OpenPosePanel {
             }
             canvas.renderAll();
         }
+
+        canvas.on('mouse:down', (e) => {
+            if (e.button === 3 && e.target && e.target.type === "circle") { // 右键单击
+                let circle = e.target
+                if (circle.id === 0) {
+                    return
+                }
+                if (circle.line1.get("visible")) {
+                    circle.line1.set("visible", false)
+                } else {
+                    circle.line1.set("visible", true)
+                }
+                canvas.renderAll();
+                this.saveToNode();
+            }
+        });
 
         canvas.on('object:moving', (e) => {
             updateLines(e.target);
@@ -799,7 +846,8 @@ class OpenPosePanel {
             const circles = g.getObjects().filter(i => i.type === "circle");
             return circles.map(c =>
                 [(c.oCoords.tl.x + c.oCoords.tr.x) / 2,
-                    (c.oCoords.tl.y + c.oCoords.bl.y) / 2]);
+                    (c.oCoords.tl.y + c.oCoords.bl.y) / 2, c.line1.get("visible") ? 1 : 0])
+
         })
         return {
             "width": this.canvas.width,
