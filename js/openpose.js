@@ -763,6 +763,17 @@ class OpenPosePanel {
         })
         if (this.canvas.backgroundImage)
             this.canvas.backgroundImage.opacity = 0
+
+        const groups = this.canvas.getObjects().filter(i => i.type === "group");
+        let circles = []
+        for (const group of groups) {
+            circles = circles.concat(group.getObjects().filter(i => i.type === "circle"))
+        }
+
+        for (const circle of circles) {
+            circle.set("visible",  circle.line1.get("visible"))
+        }
+
         this.canvas.discardActiveObject();
         this.canvas.renderAll()
 
@@ -771,6 +782,9 @@ class OpenPosePanel {
         this.canvas.getObjects("image").forEach((img) => {
             img.opacity = 1;
         })
+        for (const circle of circles) {
+            circle.set("visible",  true)
+        }
         if (this.canvas.backgroundImage)
             this.canvas.backgroundImage.opacity = 0.5
         this.canvas.renderAll()
